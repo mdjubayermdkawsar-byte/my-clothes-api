@@ -1,7 +1,6 @@
-import { pipeline, env } from '@xenova/transformers';
-import sharp from 'sharp';
+import { pipeline, env, RawImage } from '@xenova/transformers';
+import { PNG } from 'pngjs';
 
-// Vercel Serverless-এ রাইট পারমিশন শুধু /tmp ফোল্ডারে থাকে
 env.cacheDir = '/tmp/transformers_cache';
 env.allowLocalModels = false;
 
@@ -37,6 +36,18 @@ const LABEL_MAP = {
   'Scarf': 'Shirt/Top'
 };
 
+function encodeGrayscalePngBase64(data, width, height) {
+  return new Promise((resolve, reject) => {
+    const png = new PNG({ width, height, colorType: 0 }); // Grayscale PNG
+    png.data = Buffer.from(data);
+    const chunks = [];
+    png.on('data', chunk => chunks.push(chunk));
+    png.on('end', () => resolve(Buffer.concat(chunks).toString('base64')));
+    png.on('error', err => reject(err));
+    png.pack();
+  });
+}
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -58,16 +69,10 @@ export default async function handler(req, res) {
 
     const cleanB64 = image.replace(/^data:image\/\w+;base64,/, '');
     const imgBuffer = Buffer.from(cleanB64, 'base64');
-
-    // ইনফারেন্সের সুবিধার্থে ছবি সর্বোচ্চ 512px-এ প্রিপেয়ার করা
-    const resizedBuffer = await sharp(imgBuffer)
-      .resize(512, 512, { fit: 'inside', withoutEnlargement: true })
-      .png()
-      .toBuffer();
+    const rawImg = await RawImage.fromBlob(new Blob([imgBuffer]));
 
     const model = await getSegmenter();
-    const dataUri = `data:image/png;base64,${resizedBuffer.toString('base64')}`;
-    const output = await model(dataUri);
+    const output = await model(rawImg);
 
     const partsMap = {};
 
@@ -76,9 +81,10 @@ export default async function handler(req, res) {
       const cleanLabel = LABEL_MAP[rawLabel] || rawLabel;
       if (!cleanLabel) continue;
 
-      const maskW = item.mask.width;
-      const maskH = item.mask.height;
-      const rawData = item.mask.data;
+      const mask = item.mask;
+      const maskW = mask.width;
+      const maskH = mask.height;
+      const rawData = mask.data;
 
       if (!partsMap[cleanLabel]) {
         partsMap[cleanLabel] = {
@@ -111,26 +117,14 @@ export default async function handler(req, res) {
     }
 
     if (subjectData) {
-      const subjPngBuffer = await sharp(subjectData, {
-        raw: { width: sW, height: sH, channels: 1 }
-      }).png().toBuffer();
-
-      finalParts.push({
-        label: 'Subject',
-        mask: subjPngBuffer.toString('base64')
-      });
+      const subjPng = await encodeGrayscalePngBase64(subjectData, sW, sH);
+      finalParts.push({ label: 'Subject', mask: subjPng });
     }
 
     for (const [label, maskObj] of Object.entries(partsMap)) {
       if (label === 'Background') continue;
-      const pngBuffer = await sharp(maskObj.data, {
-        raw: { width: maskObj.width, height: maskObj.height, channels: 1 }
-      }).png().toBuffer();
-
-      finalParts.push({
-        label: label,
-        mask: pngBuffer.toString('base64')
-      });
+      const pngBase64 = await encodeGrayscalePngBase64(maskObj.data, maskObj.width, maskObj.height);
+      finalParts.push({ label: label, mask: pngBase64 });
     }
 
     if (subjectData) {
@@ -138,14 +132,8 @@ export default async function handler(req, res) {
       for (let i = 0; i < subjectData.length; i++) {
         bgData[i] = 255 - subjectData[i];
       }
-      const bgPngBuffer = await sharp(bgData, {
-        raw: { width: sW, height: sH, channels: 1 }
-      }).png().toBuffer();
-
-      finalParts.push({
-        label: 'Background',
-        mask: bgPngBuffer.toString('base64')
-      });
+      const bgPng = await encodeGrayscalePngBase64(bgData, sW, sH);
+      finalParts.push({ label: 'Background', mask: bgPng });
     }
 
     return res.status(200).json({
