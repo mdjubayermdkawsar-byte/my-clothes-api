@@ -1,0 +1,13 @@
+{
+  "name": "clothes-part-segmentation-api",
+  "version": "1.0.0",
+  "description": "SegFormer 18-part cloth and human body segmentation API",
+  "main": "api/segment.js",
+  "scripts": {
+    "start": "node api/segment.js"
+  },
+  "dependencies": {
+    "@xenova/transformers": "^2.17.2",
+    "sharp": "^0.33.5"
+  }
+}
